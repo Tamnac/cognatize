@@ -32,4 +32,9 @@ Let B Regex-match R5 "[->+<]";
 Print If B
   "FAIL: Empty sub-expressions match list to identify alphanumeric characters"
 else
-  "PASS: Empty sub-expressions match list to identify alphanumeric characters"
+  "PASS: Empty sub-expressions match list to identify alphanumeric characters";
+
+Print If == List (Regex-match "(a|aa)" "aa") List (True "aa")
+  "PASS: Alternation matches the longest alternative"
+else
+  "FAIL: Alternation matches the longest alternative";

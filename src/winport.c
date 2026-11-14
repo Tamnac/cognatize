@@ -30,16 +30,18 @@ void win_temp_path(char path[WIN_PATH_MAX])
 
 void* win_spawn(char** args)
 {
-	char cmdline[8192] = "";
-	for ( ; *args ; ++args)
-	{
-		strcat(cmdline, "\"");
-		strcat(cmdline, *args);
-		strcat(cmdline, "\" ");
-	}
+	size_t size = 1;
+	for (char** arg = args ; *arg ; ++arg) size += strlen(*arg) + 3;
+	char* cmdline = malloc(size);
+	if (!cmdline) return NULL;
+	char* end = cmdline;
+	for ( ; *args ; ++args) end += sprintf(end, "\"%s\" ", *args);
+	*end = '\0';
 	STARTUPINFOA si = { .cb = sizeof si };
 	PROCESS_INFORMATION pi;
-	if (!CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) return NULL;
+	BOOL created = CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+	free(cmdline);
+	if (!created) return NULL;
 	CloseHandle(pi.hThread);
 	return pi.hProcess;
 }

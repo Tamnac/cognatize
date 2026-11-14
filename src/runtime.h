@@ -66,8 +66,9 @@ typedef jmp_buf cog_jmp_buf;
 
 // Windows has no <regex.h>, so this is a small replacement for the part of it
 // that the runtime uses. Patterns are POSIX extended regular expressions (plus
-// \w \W \s \S \b \B). Matching is leftmost-first backtracking, with a table of
+// \w \W \s \S \b \B). Matching is leftmost-longest backtracking, with a table of
 // visited states so that the running time is bounded by pattern size * input size.
+// Subject strings and bracket expressions are treated as UTF-8.
 
 typedef ptrdiff_t regoff_t;
 typedef struct { regoff_t rm_so, rm_eo; } regmatch_t;
@@ -86,7 +87,17 @@ enum { RX_EMPTY, RX_CHAR, RX_ANY, RX_SET, RX_BOL, RX_EOL, RX_WORDB, RX_NWORDB,
 #define RX_DUP_MAX 255
 
 typedef struct { int op, x, y; } rx_inst;
-typedef uint8_t rx_set[32];
+typedef struct { uint32_t lo, hi; } rx_range;
+
+// A bracket expression. ASCII members are a bitmap; other code points are tested
+// against ranges and the wide versions of the named classes.
+typedef struct
+{
+	uint8_t ascii[16];
+	unsigned classes;
+	rx_range* ranges;
+	size_t nranges, ranges_cap;
+} rx_set;
 
 typedef struct
 {
@@ -123,6 +134,28 @@ static int rx_grow(void** array, size_t* cap, size_t count, size_t item_size)
 	return 0;
 }
 
+static const struct { const char* name; int (*test)(int); int (*wide_test)(wint_t); } rx_classes[] = {
+	{ "alpha", isalpha, iswalpha }, { "digit", isdigit, iswdigit }, { "alnum", isalnum, iswalnum },
+	{ "upper", isupper, iswupper }, { "lower", islower, iswlower }, { "space", isspace, iswspace },
+	{ "blank", isblank, iswblank }, { "punct", ispunct, iswpunct }, { "print", isprint, iswprint },
+	{ "graph", isgraph, iswgraph }, { "cntrl", iscntrl, iswcntrl }, { "xdigit", isxdigit, iswxdigit },
+};
+
+// Decodes the UTF-8 sequence at s. Invalid sequences are read as single bytes.
+static int rx_decode(const char* s, size_t avail, uint32_t* cp)
+{
+	const unsigned char c = s[0];
+	int n = c < 0xc0 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4;
+	if ((size_t)n > avail) n = 1;
+	*cp = n == 1 ? c : c & (0x7f >> n);
+	for (int i = 1 ; i < n ; ++i)
+	{
+		if ((s[i] & 0xc0) != 0x80) { *cp = c; return 1; }
+		*cp = *cp << 6 | (s[i] & 0x3f);
+	}
+	return n;
+}
+
 static int rx_new_node(rx_parser* P, int type, int a, int b, int l, int r)
 {
 	if (P->err) return 0;
@@ -140,18 +173,39 @@ static int rx_new_set(rx_parser* P, rx_set** set)
 	return P->nsets++;
 }
 
-static bool rx_add_class(rx_set set, const char* name, size_t len)
+static void rx_add_range(rx_parser* P, rx_set* set, uint32_t lo, uint32_t hi)
 {
-	static const struct { const char* name; int (*test)(int); } classes[] = {
-		{ "alpha", isalpha }, { "digit", isdigit }, { "alnum", isalnum }, { "upper", isupper },
-		{ "lower", islower }, { "space", isspace }, { "blank", isblank }, { "punct", ispunct },
-		{ "print", isprint }, { "graph", isgraph }, { "cntrl", iscntrl }, { "xdigit", isxdigit },
-	};
-	for (size_t i = 0 ; i < sizeof classes / sizeof classes[0] ; ++i)
+	for ( ; lo <= hi && lo < 128 ; ++lo) set->ascii[lo / 8] |= 1 << (lo % 8);
+	if (lo > hi) return;
+	if ((P->err = rx_grow((void**)&set->ranges, &set->ranges_cap, set->nranges, sizeof *set->ranges))) return;
+	set->ranges[set->nranges++] = (rx_range){ lo, hi };
+}
+
+static bool rx_set_has(const rx_set* set, uint32_t cp)
+{
+	if (cp < 128) return set->ascii[cp / 8] >> (cp % 8) & 1;
+	for (size_t i = 0 ; i < set->nranges ; ++i)
+		if (cp >= set->ranges[i].lo && cp <= set->ranges[i].hi) return true;
+	if (cp <= 0xffff)
+		for (size_t i = 0 ; i < sizeof rx_classes / sizeof rx_classes[0] ; ++i)
+			if (set->classes >> i & 1 && rx_classes[i].wide_test(cp)) return true;
+	return false;
+}
+
+static void rx_free_sets(rx_set* sets, size_t nsets)
+{
+	for (size_t i = 0 ; i < nsets ; ++i) free(sets[i].ranges);
+	free(sets);
+}
+
+static bool rx_add_class(rx_set* set, const char* name, size_t len)
+{
+	for (size_t i = 0 ; i < sizeof rx_classes / sizeof rx_classes[0] ; ++i)
 	{
-		if (strlen(classes[i].name) != len || strncmp(classes[i].name, name, len)) continue;
+		if (strlen(rx_classes[i].name) != len || strncmp(rx_classes[i].name, name, len)) continue;
 		for (int c = 0 ; c < 128 ; ++c)
-			if (classes[i].test(c)) set[c / 8] |= 1 << (c % 8);
+			if (rx_classes[i].test(c)) set->ascii[c / 8] |= 1 << (c % 8);
+		set->classes |= 1u << i;
 		return true;
 	}
 	return false;
@@ -161,7 +215,7 @@ static int rx_parse_alt(rx_parser*);
 
 static int rx_parse_bracket(rx_parser* P)
 {
-	rx_set* set;
+	rx_set* set = NULL;
 	int index = rx_new_set(P, &set);
 	bool negated = *P->p == '^';
 	if (negated) P->p++;
@@ -170,16 +224,19 @@ static int rx_parse_bracket(rx_parser* P)
 		if (P->p[0] == '[' && P->p[1] == ':')
 		{
 			const char* end = strstr(P->p + 2, ":]");
-			if (!end || !rx_add_class(*set, P->p + 2, end - P->p - 2)) P->err = REG_ECTYPE;
+			if (!end || !rx_add_class(set, P->p + 2, end - P->p - 2)) P->err = REG_ECTYPE;
 			else P->p = end + 2;
 		}
 		else if (P->p[0] == '[' && (P->p[1] == '.' || P->p[1] == '=')) P->err = REG_ECOLLATE;
 		else
 		{
-			unsigned char lo = *P->p++, hi = lo;
-			if (P->p[0] == '-' && P->p[1] && P->p[1] != ']') hi = P->p[1], P->p += 2;
+			uint32_t lo, hi;
+			P->p += rx_decode(P->p, strlen(P->p), &lo);
+			hi = lo;
+			if (P->p[0] == '-' && P->p[1] && P->p[1] != ']')
+				P->p += 1 + rx_decode(P->p + 1, strlen(P->p + 1), &hi);
 			if (hi < lo) P->err = REG_ERANGE;
-			for (int c = lo ; c <= hi ; ++c) (*set)[c / 8] |= 1 << (c % 8);
+			else rx_add_range(P, set, lo, hi);
 		}
 	}
 	if (!P->err && *P->p != ']') P->err = REG_EBRACK;
@@ -194,12 +251,12 @@ static int rx_parse_escape(rx_parser* P)
 	if (c == 'b') return rx_new_node(P, RX_WORDB, 0, 0, 0, 0);
 	if (c == 'B') return rx_new_node(P, RX_NWORDB, 0, 0, 0, 0);
 	if (!strchr("wWsS", c)) return rx_new_node(P, RX_CHAR, (unsigned char)c, 0, 0, 0);
-	rx_set* set;
+	rx_set* set = NULL;
 	int index = rx_new_set(P, &set);
 	if (!P->err)
 	{
-		if (c == 'w' || c == 'W') rx_add_class(*set, "alnum", 5), (*set)['_' / 8] |= 1 << ('_' % 8);
-		else rx_add_class(*set, "space", 5);
+		if (c == 'w' || c == 'W') rx_add_class(set, "alnum", 5), rx_add_range(P, set, '_', '_');
+		else rx_add_class(set, "space", 5);
 	}
 	return rx_new_node(P, RX_SET, index, c == 'W' || c == 'S', 0, 0);
 }
@@ -223,7 +280,16 @@ static int rx_parse_atom(rx_parser* P)
 		case '^':  return rx_new_node(P, RX_BOL, 0, 0, 0, 0);
 		case '$':  return rx_new_node(P, RX_EOL, 0, 0, 0, 0);
 		case '*': case '+': case '?': P->err = REG_BADRPT; return 0;
-		default:   return rx_new_node(P, RX_CHAR, (unsigned char)c, 0, 0, 0);
+		default:
+		{
+			// A multibyte character is one atom, so that a following repetition applies to all of it.
+			uint32_t cp;
+			int n = rx_decode(P->p - 1, strlen(P->p - 1), &cp);
+			int node = rx_new_node(P, RX_CHAR, (unsigned char)c, 0, 0, 0);
+			for (int i = 1 ; i < n ; ++i)
+				node = rx_new_node(P, RX_CAT, 0, 0, node, rx_new_node(P, RX_CHAR, (unsigned char)*P->p++, 0, 0, 0));
+			return node;
+		}
 	}
 }
 
@@ -368,7 +434,7 @@ static int regcomp(regex_t* re, const char* pattern, int flags)
 	free(P.nodes);
 	if (P.err)
 	{
-		free(P.sets);
+		rx_free_sets(P.sets, P.nsets);
 		free(P.code);
 		return P.err;
 	}
@@ -396,13 +462,6 @@ static bool rx_is_word(unsigned char c)
 	return isalnum(c) || c == '_';
 }
 
-static int rx_utf8_len(const char* s, size_t pos, size_t len)
-{
-	unsigned char c = s[pos];
-	size_t n = c < 0xc0 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4;
-	return pos + n <= len ? n : len - pos;
-}
-
 // Returns how many bytes the instruction consumes at pos, or -1 if it does not match.
 static int rx_step(const regex_t* re, const rx_inst* in, const char* s, size_t pos, size_t len)
 {
@@ -412,13 +471,15 @@ static int rx_step(const regex_t* re, const rx_inst* in, const char* s, size_t p
 	switch (in->op)
 	{
 		case RX_OP_CHAR: return pos < len && c == in->x ? 1 : -1;
-		case RX_OP_ANY:  return pos < len && !(re->newline && c == '\n') ? rx_utf8_len(s, pos, len) : -1;
+		case RX_OP_ANY:  return pos < len && !(re->newline && c == '\n') ? rx_decode(s + pos, len - pos, &(uint32_t){0}) : -1;
 		case RX_OP_SET:
+		{
 			if (pos >= len) return -1;
-			if (!in->y) return re->sets[in->x][c / 8] >> (c % 8) & 1 ? 1 : -1;
-			if (c == '\n' && re->newline) return -1;
-			if (c >= 0x80) return rx_utf8_len(s, pos, len);
-			return re->sets[in->x][c / 8] >> (c % 8) & 1 ? -1 : 1;
+			if (in->y && c == '\n' && re->newline) return -1;
+			uint32_t cp;
+			const int n = rx_decode(s + pos, len - pos, &cp);
+			return rx_set_has(&re->sets[in->x], cp) != (bool)in->y ? n : -1;
+		}
 		case RX_OP_BOL:    return pos == 0 || (re->newline && s[pos - 1] == '\n') ? 0 : -1;
 		case RX_OP_EOL:    return pos == len || (re->newline && c == '\n') ? 0 : -1;
 		case RX_OP_WORDB:  return before_word != after_word ? 0 : -1;
@@ -432,7 +493,8 @@ static int regexec(const regex_t* re, const char* s, size_t nmatch, regmatch_t p
 	const size_t len = strlen(s);
 	const size_t nslots = 2 * (re->re_nsub + 1);
 	const size_t states = re->ncode * (len + 1);
-	regoff_t* caps = malloc(nslots * sizeof *caps);
+	regoff_t* caps = malloc(2 * nslots * sizeof *caps);
+	regoff_t* best = caps + nslots;
 	uint8_t* visited = calloc(states / 8 + 1, 1);
 	rx_job* jobs = NULL;
 	size_t njobs = 0, jobs_cap = 0;
@@ -445,7 +507,7 @@ static int regexec(const regex_t* re, const char* s, size_t nmatch, regmatch_t p
 	{
 		if ((status = rx_grow((void**)&jobs, &jobs_cap, njobs, sizeof *jobs))) break;
 		jobs[njobs++] = (rx_job){ 0, -1, start };
-		while (njobs && !found && !status)
+		while (njobs && !status)
 		{
 			rx_job job = jobs[--njobs];
 			if (job.slot >= 0) { caps[job.slot] = job.value; continue; }
@@ -457,7 +519,16 @@ static int regexec(const regex_t* re, const char* s, size_t nmatch, regmatch_t p
 				if (visited[state / 8] >> (state % 8) & 1) break;
 				visited[state / 8] |= 1 << (state % 8);
 				const rx_inst* in = &re->code[pc];
-				if (in->op == RX_OP_MATCH) { caps[0] = start; caps[1] = pos; found = true; break; }
+				if (in->op == RX_OP_MATCH)
+				{
+					if (found && (regoff_t)pos <= best[1]) break;
+					memcpy(best, caps, nslots * sizeof *caps);
+					best[0] = start;
+					best[1] = pos;
+					found = true;
+					if (pos == len) njobs = 0;
+					break;
+				}
 				if (in->op == RX_OP_JMP) { pc = in->x; continue; }
 				if (in->op == RX_OP_SPLIT || in->op == RX_OP_SAVE)
 				{
@@ -478,8 +549,8 @@ static int regexec(const regex_t* re, const char* s, size_t nmatch, regmatch_t p
 	if (!status)
 		for (size_t i = 0 ; i < nmatch ; ++i)
 		{
-			bool set = i <= re->re_nsub && caps[2 * i] >= 0 && caps[2 * i + 1] >= 0;
-			pmatch[i] = (regmatch_t){ set ? caps[2 * i] : -1, set ? caps[2 * i + 1] : -1 };
+			bool set = i <= re->re_nsub && best[2 * i] >= 0 && best[2 * i + 1] >= 0;
+			pmatch[i] = (regmatch_t){ set ? best[2 * i] : -1, set ? best[2 * i + 1] : -1 };
 		}
 done:
 	free(caps);
