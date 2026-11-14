@@ -16,9 +16,17 @@
 #include <stdarg.h>
 #include <locale.h>
 #include <signal.h>
-#include <sys/resource.h>
 #include <time.h>
+#ifdef _WIN32
+// windows.h defines its own BOOLEAN, which the runtime redefines below.
+#define BOOLEAN WINDOWS_BOOLEAN
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#undef BOOLEAN
+#else
+#include <sys/resource.h>
 #include <sys/mman.h>
+#endif
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,14 +40,464 @@
 #define __nmatch
 #endif
 
-#include <regex.h>
+#ifdef _WIN32
 
-#define KILOBYTE 1024l
-#define MEGABYTE 1024l*KILOBYTE
-#define GIGABYTE 1024l*MEGABYTE
-#define TERABYTE 1024l*GIGABYTE
-#define ALLOC_SIZE 100l*GIGABYTE
-#define ALLOC_START (void*)(42l * TERABYTE)
+// Windows has no <regex.h>, so this is a small replacement for the part of it
+// that the runtime uses. Patterns are POSIX extended regular expressions (plus
+// \w \W \s \S \b \B). Matching is leftmost-first backtracking, with a table of
+// visited states so that the running time is bounded by pattern size * input size.
+
+typedef ptrdiff_t regoff_t;
+typedef struct { regoff_t rm_so, rm_eo; } regmatch_t;
+
+enum { REG_EXTENDED = 1, REG_NEWLINE = 2 };
+enum { REG_NOMATCH = 1, REG_BADPAT, REG_ECOLLATE, REG_ECTYPE, REG_EESCAPE, REG_ESUBREG,
+       REG_EBRACK, REG_EPAREN, REG_EBRACE, REG_BADBR, REG_ERANGE, REG_ESPACE, REG_BADRPT };
+
+enum { RX_OP_CHAR, RX_OP_ANY, RX_OP_SET, RX_OP_BOL, RX_OP_EOL, RX_OP_WORDB, RX_OP_NWORDB,
+       RX_OP_SPLIT, RX_OP_JMP, RX_OP_SAVE, RX_OP_MATCH };
+
+enum { RX_EMPTY, RX_CHAR, RX_ANY, RX_SET, RX_BOL, RX_EOL, RX_WORDB, RX_NWORDB,
+       RX_CAT, RX_ALT, RX_REP, RX_GROUP };
+
+#define RX_MAX_CODE (1 << 18)
+#define RX_DUP_MAX 255
+
+typedef struct { int op, x, y; } rx_inst;
+typedef uint8_t rx_set[32];
+
+typedef struct
+{
+	size_t re_nsub;
+	rx_inst* code;
+	size_t ncode;
+	rx_set* sets;
+	bool newline;
+} regex_t;
+
+typedef struct { int type, a, b, l, r; } rx_node;
+
+typedef struct
+{
+	const char* p;
+	int err;
+	int ngroups;
+	rx_node* nodes;
+	size_t nnodes, nodes_cap;
+	rx_set* sets;
+	size_t nsets, sets_cap;
+	rx_inst* code;
+	size_t ncode, code_cap;
+} rx_parser;
+
+static int rx_grow(void** array, size_t* cap, size_t count, size_t item_size)
+{
+	if (count < *cap) return 0;
+	size_t new_cap = *cap ? *cap * 2 : 32;
+	void* grown = realloc(*array, new_cap * item_size);
+	if (!grown) return REG_ESPACE;
+	*array = grown;
+	*cap = new_cap;
+	return 0;
+}
+
+static int rx_new_node(rx_parser* P, int type, int a, int b, int l, int r)
+{
+	if (P->err) return 0;
+	if ((P->err = rx_grow((void**)&P->nodes, &P->nodes_cap, P->nnodes, sizeof *P->nodes))) return 0;
+	P->nodes[P->nnodes] = (rx_node){ type, a, b, l, r };
+	return P->nnodes++;
+}
+
+static int rx_new_set(rx_parser* P, rx_set** set)
+{
+	if (P->err) return 0;
+	if ((P->err = rx_grow((void**)&P->sets, &P->sets_cap, P->nsets, sizeof *P->sets))) return 0;
+	*set = &P->sets[P->nsets];
+	memset(*set, 0, sizeof **set);
+	return P->nsets++;
+}
+
+static bool rx_add_class(rx_set set, const char* name, size_t len)
+{
+	static const struct { const char* name; int (*test)(int); } classes[] = {
+		{ "alpha", isalpha }, { "digit", isdigit }, { "alnum", isalnum }, { "upper", isupper },
+		{ "lower", islower }, { "space", isspace }, { "blank", isblank }, { "punct", ispunct },
+		{ "print", isprint }, { "graph", isgraph }, { "cntrl", iscntrl }, { "xdigit", isxdigit },
+	};
+	for (size_t i = 0 ; i < sizeof classes / sizeof classes[0] ; ++i)
+	{
+		if (strlen(classes[i].name) != len || strncmp(classes[i].name, name, len)) continue;
+		for (int c = 0 ; c < 128 ; ++c)
+			if (classes[i].test(c)) set[c / 8] |= 1 << (c % 8);
+		return true;
+	}
+	return false;
+}
+
+static int rx_parse_alt(rx_parser*);
+
+static int rx_parse_bracket(rx_parser* P)
+{
+	rx_set* set;
+	int index = rx_new_set(P, &set);
+	bool negated = *P->p == '^';
+	if (negated) P->p++;
+	for (bool first = true ; !P->err && *P->p && (*P->p != ']' || first) ; first = false)
+	{
+		if (P->p[0] == '[' && P->p[1] == ':')
+		{
+			const char* end = strstr(P->p + 2, ":]");
+			if (!end || !rx_add_class(*set, P->p + 2, end - P->p - 2)) P->err = REG_ECTYPE;
+			else P->p = end + 2;
+		}
+		else if (P->p[0] == '[' && (P->p[1] == '.' || P->p[1] == '=')) P->err = REG_ECOLLATE;
+		else
+		{
+			unsigned char lo = *P->p++, hi = lo;
+			if (P->p[0] == '-' && P->p[1] && P->p[1] != ']') hi = P->p[1], P->p += 2;
+			if (hi < lo) P->err = REG_ERANGE;
+			for (int c = lo ; c <= hi ; ++c) (*set)[c / 8] |= 1 << (c % 8);
+		}
+	}
+	if (!P->err && *P->p != ']') P->err = REG_EBRACK;
+	else P->p++;
+	return rx_new_node(P, RX_SET, index, negated, 0, 0);
+}
+
+static int rx_parse_escape(rx_parser* P)
+{
+	char c = *P->p++;
+	if (!c) { P->err = REG_EESCAPE; return 0; }
+	if (c == 'b') return rx_new_node(P, RX_WORDB, 0, 0, 0, 0);
+	if (c == 'B') return rx_new_node(P, RX_NWORDB, 0, 0, 0, 0);
+	if (!strchr("wWsS", c)) return rx_new_node(P, RX_CHAR, (unsigned char)c, 0, 0, 0);
+	rx_set* set;
+	int index = rx_new_set(P, &set);
+	if (!P->err)
+	{
+		if (c == 'w' || c == 'W') rx_add_class(*set, "alnum", 5), (*set)['_' / 8] |= 1 << ('_' % 8);
+		else rx_add_class(*set, "space", 5);
+	}
+	return rx_new_node(P, RX_SET, index, c == 'W' || c == 'S', 0, 0);
+}
+
+static int rx_parse_atom(rx_parser* P)
+{
+	char c = *P->p++;
+	switch (c)
+	{
+		case '(':
+		{
+			int group = ++P->ngroups;
+			int inner = rx_parse_alt(P);
+			if (*P->p != ')') P->err = REG_EPAREN;
+			else P->p++;
+			return rx_new_node(P, RX_GROUP, group, 0, inner, 0);
+		}
+		case '[':  return rx_parse_bracket(P);
+		case '\\': return rx_parse_escape(P);
+		case '.':  return rx_new_node(P, RX_ANY, 0, 0, 0, 0);
+		case '^':  return rx_new_node(P, RX_BOL, 0, 0, 0, 0);
+		case '$':  return rx_new_node(P, RX_EOL, 0, 0, 0, 0);
+		case '*': case '+': case '?': P->err = REG_BADRPT; return 0;
+		default:   return rx_new_node(P, RX_CHAR, (unsigned char)c, 0, 0, 0);
+	}
+}
+
+// Parses the inside of {m}, {m,} or {m,n}. Anything else makes the brace a literal.
+static bool rx_parse_interval(rx_parser* P, int* min, int* max)
+{
+	const char* p = P->p + 1;
+	if (!isdigit((unsigned char)*p)) return false;
+	*min = strtol(p, (char**)&p, 10);
+	*max = *min;
+	if (*p == ',')
+	{
+		p++;
+		*max = isdigit((unsigned char)*p) ? (int)strtol(p, (char**)&p, 10) : -1;
+	}
+	if (*p != '}') return false;
+	if (*min > RX_DUP_MAX || *max > RX_DUP_MAX || (*max >= 0 && *max < *min)) { P->err = REG_BADBR; return false; }
+	P->p = p + 1;
+	return true;
+}
+
+static int rx_parse_repeat(rx_parser* P)
+{
+	int node = rx_parse_atom(P);
+	for (;;)
+	{
+		int min, max;
+		if (*P->p == '*') min = 0, max = -1, P->p++;
+		else if (*P->p == '+') min = 1, max = -1, P->p++;
+		else if (*P->p == '?') min = 0, max = 1, P->p++;
+		else if (*P->p != '{' || !rx_parse_interval(P, &min, &max)) return node;
+		node = rx_new_node(P, RX_REP, min, max, node, 0);
+	}
+}
+
+static int rx_parse_cat(rx_parser* P)
+{
+	int node = rx_new_node(P, RX_EMPTY, 0, 0, 0, 0);
+	bool empty = true;
+	while (!P->err && *P->p && *P->p != '|' && *P->p != ')')
+	{
+		int next = rx_parse_repeat(P);
+		node = empty ? next : rx_new_node(P, RX_CAT, 0, 0, node, next);
+		empty = false;
+	}
+	return node;
+}
+
+static int rx_parse_alt(rx_parser* P)
+{
+	int node = rx_parse_cat(P);
+	while (!P->err && *P->p == '|')
+	{
+		P->p++;
+		node = rx_new_node(P, RX_ALT, 0, 0, node, rx_parse_cat(P));
+	}
+	return node;
+}
+
+static size_t rx_emit(rx_parser* P, int op, int x, int y)
+{
+	if (P->ncode >= RX_MAX_CODE) P->err = REG_ESPACE;
+	if (!P->err) P->err = rx_grow((void**)&P->code, &P->code_cap, P->ncode, sizeof *P->code);
+	if (P->err) return 0;
+	P->code[P->ncode] = (rx_inst){ op, x, y };
+	return P->ncode++;
+}
+
+static void rx_generate(rx_parser* P, int n)
+{
+	if (P->err) return;
+	const rx_node nd = P->nodes[n];
+	switch (nd.type)
+	{
+		case RX_EMPTY: break;
+		case RX_CHAR:   rx_emit(P, RX_OP_CHAR, nd.a, 0); break;
+		case RX_ANY:    rx_emit(P, RX_OP_ANY, 0, 0); break;
+		case RX_SET:    rx_emit(P, RX_OP_SET, nd.a, nd.b); break;
+		case RX_BOL:    rx_emit(P, RX_OP_BOL, 0, 0); break;
+		case RX_EOL:    rx_emit(P, RX_OP_EOL, 0, 0); break;
+		case RX_WORDB:  rx_emit(P, RX_OP_WORDB, 0, 0); break;
+		case RX_NWORDB: rx_emit(P, RX_OP_NWORDB, 0, 0); break;
+		case RX_CAT: rx_generate(P, nd.l); rx_generate(P, nd.r); break;
+		case RX_ALT:
+		{
+			size_t split = rx_emit(P, RX_OP_SPLIT, 0, 0);
+			P->code[split].x = P->ncode;
+			rx_generate(P, nd.l);
+			size_t jump = rx_emit(P, RX_OP_JMP, 0, 0);
+			P->code[split].y = P->ncode;
+			rx_generate(P, nd.r);
+			P->code[jump].x = P->ncode;
+			break;
+		}
+		case RX_GROUP:
+			rx_emit(P, RX_OP_SAVE, 2 * nd.a, 0);
+			rx_generate(P, nd.l);
+			rx_emit(P, RX_OP_SAVE, 2 * nd.a + 1, 0);
+			break;
+		case RX_REP:
+		{
+			int min = nd.a, max = nd.b;
+			for (int i = 0 ; i < min - (max < 0 && min > 0) ; ++i) rx_generate(P, nd.l);
+			if (max < 0 && min == 0)
+			{
+				size_t split = rx_emit(P, RX_OP_SPLIT, 0, 0);
+				P->code[split].x = P->ncode;
+				rx_generate(P, nd.l);
+				rx_emit(P, RX_OP_JMP, split, 0);
+				P->code[split].y = P->ncode;
+			}
+			else if (max < 0)
+			{
+				size_t body = P->ncode;
+				rx_generate(P, nd.l);
+				size_t split = rx_emit(P, RX_OP_SPLIT, body, 0);
+				P->code[split].y = P->ncode;
+			}
+			else
+			{
+				size_t splits[RX_DUP_MAX];
+				for (int i = 0 ; i < max - min ; ++i)
+				{
+					splits[i] = rx_emit(P, RX_OP_SPLIT, 0, 0);
+					P->code[splits[i]].x = P->ncode;
+					rx_generate(P, nd.l);
+				}
+				for (int i = 0 ; i < max - min ; ++i) P->code[splits[i]].y = P->ncode;
+			}
+			break;
+		}
+	}
+}
+
+static int regcomp(regex_t* re, const char* pattern, int flags)
+{
+	rx_parser P = { .p = pattern };
+	int root = rx_parse_alt(&P);
+	if (!P.err && *P.p == ')') P.err = REG_EPAREN;
+	rx_generate(&P, root);
+	rx_emit(&P, RX_OP_MATCH, 0, 0);
+	free(P.nodes);
+	if (P.err)
+	{
+		free(P.sets);
+		free(P.code);
+		return P.err;
+	}
+	*re = (regex_t){ .re_nsub = P.ngroups, .code = P.code, .ncode = P.ncode, .sets = P.sets, .newline = flags & REG_NEWLINE };
+	return 0;
+}
+
+static size_t regerror(int code, const regex_t* re, char* buf, size_t size)
+{
+	static const char* messages[] = {
+		"Success", "No match", "Invalid regular expression", "Invalid collation character",
+		"Invalid character class name", "Trailing backslash", "Invalid back reference",
+		"Unmatched [, [^, [:, [., or [=", "Unmatched ( or \\(", "Unmatched \\{",
+		"Invalid content of \\{\\}", "Invalid range end", "Memory exhausted",
+		"Invalid preceding regular expression",
+	};
+	const char* msg = code >= 0 && code < (int)(sizeof messages / sizeof messages[0]) ? messages[code] : "Unknown error";
+	return snprintf(buf, size, "%s", msg) + 1;
+}
+
+typedef struct { int pc; int slot; regoff_t value; } rx_job;
+
+static bool rx_is_word(unsigned char c)
+{
+	return isalnum(c) || c == '_';
+}
+
+static int rx_utf8_len(const char* s, size_t pos, size_t len)
+{
+	unsigned char c = s[pos];
+	size_t n = c < 0xc0 ? 1 : c < 0xe0 ? 2 : c < 0xf0 ? 3 : 4;
+	return pos + n <= len ? n : len - pos;
+}
+
+// Returns how many bytes the instruction consumes at pos, or -1 if it does not match.
+static int rx_step(const regex_t* re, const rx_inst* in, const char* s, size_t pos, size_t len)
+{
+	unsigned char c = pos < len ? s[pos] : 0;
+	bool before_word = pos > 0 && rx_is_word(s[pos - 1]);
+	bool after_word = pos < len && rx_is_word(c);
+	switch (in->op)
+	{
+		case RX_OP_CHAR: return pos < len && c == in->x ? 1 : -1;
+		case RX_OP_ANY:  return pos < len && !(re->newline && c == '\n') ? rx_utf8_len(s, pos, len) : -1;
+		case RX_OP_SET:
+			if (pos >= len) return -1;
+			if (!in->y) return re->sets[in->x][c / 8] >> (c % 8) & 1 ? 1 : -1;
+			if (c == '\n' && re->newline) return -1;
+			if (c >= 0x80) return rx_utf8_len(s, pos, len);
+			return re->sets[in->x][c / 8] >> (c % 8) & 1 ? -1 : 1;
+		case RX_OP_BOL:    return pos == 0 || (re->newline && s[pos - 1] == '\n') ? 0 : -1;
+		case RX_OP_EOL:    return pos == len || (re->newline && c == '\n') ? 0 : -1;
+		case RX_OP_WORDB:  return before_word != after_word ? 0 : -1;
+		case RX_OP_NWORDB: return before_word == after_word ? 0 : -1;
+	}
+	return -1;
+}
+
+static int regexec(const regex_t* re, const char* s, size_t nmatch, regmatch_t pmatch[], int eflags)
+{
+	const size_t len = strlen(s);
+	const size_t nslots = 2 * (re->re_nsub + 1);
+	const size_t states = re->ncode * (len + 1);
+	regoff_t* caps = malloc(nslots * sizeof *caps);
+	uint8_t* visited = calloc(states / 8 + 1, 1);
+	rx_job* jobs = NULL;
+	size_t njobs = 0, jobs_cap = 0;
+	bool found = false;
+	int status = 0;
+	if (!caps || !visited) { status = REG_ESPACE; goto done; }
+	for (size_t i = 0 ; i < nslots ; ++i) caps[i] = -1;
+
+	for (size_t start = 0 ; start <= len && !found && !status ; ++start)
+	{
+		if ((status = rx_grow((void**)&jobs, &jobs_cap, njobs, sizeof *jobs))) break;
+		jobs[njobs++] = (rx_job){ 0, -1, start };
+		while (njobs && !found && !status)
+		{
+			rx_job job = jobs[--njobs];
+			if (job.slot >= 0) { caps[job.slot] = job.value; continue; }
+			int pc = job.pc;
+			size_t pos = job.value;
+			for (;;)
+			{
+				size_t state = pc * (len + 1) + pos;
+				if (visited[state / 8] >> (state % 8) & 1) break;
+				visited[state / 8] |= 1 << (state % 8);
+				const rx_inst* in = &re->code[pc];
+				if (in->op == RX_OP_MATCH) { caps[0] = start; caps[1] = pos; found = true; break; }
+				if (in->op == RX_OP_JMP) { pc = in->x; continue; }
+				if (in->op == RX_OP_SPLIT || in->op == RX_OP_SAVE)
+				{
+					if ((status = rx_grow((void**)&jobs, &jobs_cap, njobs, sizeof *jobs))) break;
+					if (in->op == RX_OP_SPLIT) jobs[njobs++] = (rx_job){ in->y, -1, pos }, pc = in->x;
+					else jobs[njobs++] = (rx_job){ 0, in->x, caps[in->x] }, caps[in->x] = pos, pc++;
+					continue;
+				}
+				int advance = rx_step(re, in, s, pos, len);
+				if (advance < 0) break;
+				pos += advance;
+				pc++;
+			}
+		}
+	}
+
+	if (!status && !found) status = REG_NOMATCH;
+	if (!status)
+		for (size_t i = 0 ; i < nmatch ; ++i)
+		{
+			bool set = i <= re->re_nsub && caps[2 * i] >= 0 && caps[2 * i + 1] >= 0;
+			pmatch[i] = (regmatch_t){ set ? caps[2 * i] : -1, set ? caps[2 * i + 1] : -1 };
+		}
+done:
+	free(caps);
+	free(visited);
+	free(jobs);
+	return status;
+}
+
+#else
+#include <regex.h>
+#endif
+
+#ifdef _WIN32
+static ssize_t compat_getline(char** line, size_t* size, FILE* fp)
+{
+	size_t len = 0;
+	int c;
+	while ((c = fgetc(fp)) != EOF)
+	{
+		if (len + 2 > *size)
+		{
+			*size = *size ? *size * 2 : 128;
+			*line = realloc(*line, *size);
+		}
+		(*line)[len++] = c;
+		if (c == '\n') break;
+	}
+	if (!len) return -1;
+	(*line)[len] = '\0';
+	return len;
+}
+#define getline compat_getline
+#endif
+
+#define KILOBYTE 1024ll
+#define MEGABYTE 1024ll*KILOBYTE
+#define GIGABYTE 1024ll*MEGABYTE
+#define TERABYTE 1024ll*GIGABYTE
+#define ALLOC_SIZE 100ll*GIGABYTE
+#define ALLOC_START (void*)(42ll * TERABYTE)
 
 #ifdef GCTEST
 #define GC_FIRST_THRESHOLD 16
@@ -58,6 +516,12 @@
 #define TYPE_MASK ((uint64_t)0xffff000000000007) // Everything left
 
 #define UNALIGNED_PTR_MASK  ((uint64_t)0x0000ffffffffffff) // 48 bit unaligned pointers
+
+#ifdef _WIN32
+#define BINARY_MODE "b" // Avoid newline translation, so file sizes match what is read.
+#else
+#define BINARY_MODE ""
+#endif
 
 #define MEM_PROT PROT_READ|PROT_WRITE
 #define MEM_FLAGS MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE
@@ -386,7 +850,8 @@ static const char *lookup_type(cognate_type);
 static ptrdiff_t compare_lists(LIST, LIST);
 static ptrdiff_t compare_tables(TABLE, TABLE);
 static _Bool match_lists(LIST, LIST);
-static void handle_error_signal(int, siginfo_t*, void *);
+static void init_signal_handlers(void);
+static void* reserve_memory(size_t);
 static void assert_impure(void);
 
 #ifdef DEBUG
@@ -406,10 +871,17 @@ int main(int argc, char** argv)
 	_argc = argc;
 	_argv = argv;
 	// Set locale for strings.
+#ifdef _WIN32
+	SetConsoleCP(CP_UTF8);
+	SetConsoleOutputCP(CP_UTF8);
+	if unlikely(setlocale(LC_ALL, ".UTF-8") == NULL)
+#else
 	if unlikely(setlocale(LC_ALL, "") == NULL)
+#endif
 	{
 		throw_error("Cannot set locale");
 	}
+	init_signal_handlers();
 	// Init GC
 	gc_init();
 	// Seed the random number generator properly.
@@ -421,14 +893,6 @@ int main(int argc, char** argv)
 	srand(ts.tv_nsec ^ ts.tv_sec); // TODO make random more random.
 	// Load parameters
 	while (argc --> 1) cmdline_parameters = ___push(box_STRING(argv[argc]), cmdline_parameters);
-	// Bind error signals.
-	struct sigaction error_signal_action;
-   error_signal_action.sa_sigaction = handle_error_signal;
-   sigemptyset(&error_signal_action.sa_mask);
-   error_signal_action.sa_flags = SA_SIGINFO;
-	char signals[] = { SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGABRT, SIGBUS, SIGFPE, SIGPIPE, SIGTERM, SIGCHLD, SIGSEGV };
-	for (size_t i = 0; i < sizeof(signals); ++i)
-		if (sigaction(signals[i], &error_signal_action, NULL) == -1) throw_error("couldn't install signal handler");
 	// Allocate buffer for object printing
 	init_general_purpose_buffer();
 	// Initialize the stack.
@@ -688,18 +1152,102 @@ static _Noreturn void throw_error(const char* const msg)
 	throw_error_fmt("%s", msg);
 }
 
+static _Noreturn void throw_memory_error(char* addr)
+{
+	if (addr >= (char*)stack.absolute_start && addr <= (char*)stack.absolute_start + ALLOC_SIZE)
+		throw_error_fmt("Stack overflow (%zu items on the stack)", stack.top - stack.absolute_start);
+	else
+		throw_error("Memory error");
+}
+
+#ifdef _WIN32
+
+// Memory is reserved up front and committed in chunks when first touched,
+// which mirrors the lazy allocation of mmap with MAP_NORESERVE.
+#define COMMIT_CHUNK (1ll*MEGABYTE)
+#define MAX_REGIONS (2 * (GC_MAX_HEAPS + 4))
+
+static struct { char* start; size_t size; } regions[MAX_REGIONS];
+static size_t region_count = 0;
+
+static void* reserve_memory(size_t size)
+{
+	char* mem = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_READWRITE);
+	if unlikely(!mem || region_count == MAX_REGIONS) throw_error("Cannot reserve memory");
+	regions[region_count].start = mem;
+	regions[region_count].size = size;
+	region_count++;
+	return mem;
+}
+
+static bool commit_chunk(char* addr)
+{
+	for (size_t i = 0 ; i < region_count ; ++i)
+	{
+		char* start = regions[i].start;
+		char* end = start + regions[i].size;
+		if (addr < start || addr >= end) continue;
+		char* chunk = start + (size_t)(addr - start) / COMMIT_CHUNK * COMMIT_CHUNK;
+		size_t size = end - chunk < COMMIT_CHUNK ? end - chunk : COMMIT_CHUNK;
+		return VirtualAlloc(chunk, size, MEM_COMMIT, PAGE_READWRITE) != NULL;
+	}
+	return false;
+}
+
+static LONG WINAPI handle_exception(EXCEPTION_POINTERS* info)
+{
+	EXCEPTION_RECORD* record = info->ExceptionRecord;
+	if (record->ExceptionCode == EXCEPTION_STACK_OVERFLOW)
+	{
+		fputs("\n\n\033[31;1m    Stack overflow\n\n\033[0m", stderr);
+		_exit(EXIT_FAILURE);
+	}
+	if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+	char* addr = (char*)record->ExceptionInformation[1];
+	if (commit_chunk(addr)) return EXCEPTION_CONTINUE_EXECUTION;
+	throw_memory_error(addr);
+}
+
+static void handle_error_signal(int sig)
+{
+	const char* name = sig == SIGINT ? "Interrupt" : sig == SIGTERM ? "Terminated" : sig == SIGABRT ? "Aborted"
+		: sig == SIGFPE ? "Floating point exception" : sig == SIGILL ? "Illegal instruction" : "Unknown signal";
+	throw_error_fmt("Received signal %i (%s)", sig, name);
+}
+
+static void init_signal_handlers(void)
+{
+	AddVectoredExceptionHandler(1, handle_exception);
+	int signals[] = { SIGINT, SIGILL, SIGABRT, SIGFPE, SIGTERM };
+	for (size_t i = 0; i < sizeof(signals)/sizeof(signals[0]); ++i)
+		if (signal(signals[i], handle_error_signal) == SIG_ERR) throw_error("couldn't install signal handler");
+}
+
+#else
+
+static void* reserve_memory(size_t size)
+{
+	return mmap(ALLOC_START, size, MEM_PROT, MEM_FLAGS, -1, 0);
+}
+
 static void handle_error_signal(int sig, siginfo_t *info, void *ucontext)
 {
-	if (sig == SIGSEGV)
-	{
-		char* addr = (char*)info->si_addr;
-		if (addr >= (char*)stack.absolute_start && addr <= (char*)stack.absolute_start + ALLOC_SIZE)
-			throw_error_fmt("Stack overflow (%zu items on the stack)", stack.top - stack.absolute_start);
-		else
-			throw_error("Memory error");
-	}
+	if (sig == SIGSEGV) throw_memory_error((char*)info->si_addr);
 	else throw_error_fmt("Received signal %i (%s)", sig, strsignal(sig));
 }
+
+static void init_signal_handlers(void)
+{
+	struct sigaction error_signal_action;
+	error_signal_action.sa_sigaction = handle_error_signal;
+	sigemptyset(&error_signal_action.sa_mask);
+	error_signal_action.sa_flags = SA_SIGINFO;
+	char signals[] = { SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGABRT, SIGBUS, SIGFPE, SIGPIPE, SIGTERM, SIGCHLD, SIGSEGV };
+	for (size_t i = 0; i < sizeof(signals); ++i)
+		if (sigaction(signals[i], &error_signal_action, NULL) == -1) throw_error("couldn't install signal handler");
+}
+
+#endif
 
 static cognate_type type_of(ANY a)
 {
@@ -880,13 +1428,13 @@ static STRING show_object (const ANY object, char* buffer, LIST checked)
 
 static void init_general_purpose_buffer(void)
 {
-	general_purpose_buffer = mmap(ALLOC_START, ALLOC_SIZE, MEM_PROT, MEM_FLAGS, -1, 0);
+	general_purpose_buffer = reserve_memory(ALLOC_SIZE);
 }
 
 static void init_stack(void)
 {
 	stack.absolute_start = stack.top = stack.start
-		= mmap(ALLOC_START, ALLOC_SIZE, MEM_PROT, MEM_FLAGS, -1, 0);
+		= reserve_memory(ALLOC_SIZE);
 }
 
 __attribute__((hot))
@@ -1439,8 +1987,8 @@ static uint8_t gc_bitmap_get(gc_heap* heap, size_t index)
 
 static void gc_init_heap(gc_heap* heap)
 {
-	heap->bitmap = mmap(ALLOC_START, ALLOC_SIZE/16, MEM_PROT, MEM_FLAGS, -1, 0);
-	heap->start  = mmap(ALLOC_START, ALLOC_SIZE,    MEM_PROT, MEM_FLAGS, -1, 0);
+	heap->bitmap = reserve_memory(ALLOC_SIZE/16);
+	heap->start  = reserve_memory(ALLOC_SIZE);
 	heap->alloc  = 0;
 	gc_bitmap_set(heap, 0, ALLOC);
 }
@@ -1882,7 +2430,7 @@ static STRING ___input(void)
 	// Read user input to a string.
 	assert_impure();
 	size_t size = 0;
-	char* buf;
+	char* buf = NULL;
 	size_t chars = getline(&buf, &size, stdin);
 	char* ret = gc_strndup(buf, chars-1); // Don't copy trailing newline.
 	free(buf);
@@ -1988,7 +2536,11 @@ static void ___error(STRING str)
 static void ___wait(NUMBER seconds)
 {
 	assert_impure();
+#ifdef _WIN32
+	Sleep(seconds * 1000);
+#else
 	sleep(seconds);
+#endif
 }
 
 /*
@@ -2275,12 +2827,12 @@ static IO ___open(SYMBOL m, STRING path)
 {
 	assert_impure();
 	char* mode;
-	if (m == SYMread) mode = "r";
-	else if (m == SYMwrite) mode = "w";
-	else if (m == SYMappend) mode = "a";
-	else if (m == SYMreadHappend) mode = "a+";
-	else if (m == SYMreadHwrite) mode = "w+";
-	else if (m == SYMreadHwriteHexisting) mode = "r+";
+	if (m == SYMread) mode = "r" BINARY_MODE;
+	else if (m == SYMwrite) mode = "w" BINARY_MODE;
+	else if (m == SYMappend) mode = "a" BINARY_MODE;
+	else if (m == SYMreadHappend) mode = "a+" BINARY_MODE;
+	else if (m == SYMreadHwrite) mode = "w+" BINARY_MODE;
+	else if (m == SYMreadHwriteHexisting) mode = "r+" BINARY_MODE;
 	else throw_error("Expected one of \\read, \\write, \\append, \\read-write, \\read-append, \\read-write-existing");
 	FILE* fp = fopen(path, mode);
 	if unlikely(!fp) throw_error_fmt("Cannot open file '%s'", path);
