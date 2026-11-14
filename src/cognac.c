@@ -11,9 +11,13 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#ifdef _WIN32
+#include "winport.h"
+#else
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <execinfo.h>
+#endif
 
 
 #define STR_(x) #x
@@ -25,15 +29,30 @@
 ast_list_t* full_ast = NULL;
 module_t* pmod = NULL;
 char* heap = NULL;
+#ifdef _WIN32
+#define HEAP_COMMIT_CHUNK (16 * 1024 * 1024)
+char* heap_committed = NULL;
+#endif
 module_t prelude1 = { .prefix = "prelude" }; // written in C
 module_t prelude2 = { .prefix = "prelude" }; // written in Cognate
 module_list_t preludes = { .mod=&prelude2, .next = &(module_list_t){.mod=&prelude1, .next=NULL} };
 
 const char* builtin_symbols[] = { "start", "end", "current", "read", "write", "append", "read-write", "read-append", "read-write-existing" };
 
+#ifdef _WIN32
+char runtime_filename[WIN_PATH_MAX];
+#define IS_PATH_SEP(c) ((c) == '/' || (c) == '\\')
+#else
 char runtime_filename[] = "/tmp/cognac-runtime-XXXXXX.h";
-
+#define IS_PATH_SEP(c) ((c) == '/')
 int usleep (unsigned int);
+#endif
+
+#ifdef _WIN32
+#define LINK_ARGS "-Wl,--stack,268435456",
+#else
+#define LINK_ARGS
+#endif
 char* strdup (const char*);
 
 bool debug = false;
@@ -78,9 +97,11 @@ _Noreturn static void unreachable(void)
 
 	write(STDERR_FILENO, msg, sizeof(msg));
 
+#ifndef _WIN32
 	static void *bt[128];
 	int bt_sz = backtrace(bt, 128);
 	backtrace_symbols_fd(bt, bt_sz, STDERR_FILENO);
+#endif
 	write(STDERR_FILENO, "\033[0m\n\n", sizeof("\033[0m\n\n"));
 	abort();
 }
@@ -88,6 +109,14 @@ _Noreturn static void unreachable(void)
 static void* alloc(size_t n)
 {
 	// allocate n bytes (leaking).
+#ifdef _WIN32
+	if (heap + n > heap_committed)
+	{
+		size_t grow = (n + HEAP_COMMIT_CHUNK - 1) / HEAP_COMMIT_CHUNK * HEAP_COMMIT_CHUNK;
+		win_commit(heap_committed, grow);
+		heap_committed += grow;
+	}
+#endif
 	return (heap += n) - n;
 }
 
@@ -438,7 +467,7 @@ module_t* create_module(char* path)
 	if (!mod->file) { fprintf(stderr, "Can't open file '%s'\n", path); exit(EXIT_FAILURE); }
 	char* path2 = strdup(path);
 	char* path3 = path2;
-	for (char* s = path2 ; *s ; ++s) if (*s == '/') path2 = s+1;
+	for (char* s = path2 ; *s ; ++s) if (IS_PATH_SEP(*s)) path2 = s+1;
 	for (char* s = path2 ; *s ; ++s) if (*s == '.') { *s = '\0'; break; }
 	if (path2 != path3) {
 		path2[-1] = '\0';
@@ -829,6 +858,17 @@ const char* c_word_name(word_t* word)
 	return sanitize(str);
 }
 
+static void print_progress(module_t* mod, const char* exe_path, int* i)
+{
+	char* bar[3] = { "> >> >> >> >> >> >> >> >> >> ", ">> >> >> >> >> >> >> >> >> >>", " >> >> >> >> >> >> >> >> >> >" };
+	fputc('\r', stdout);
+	printf("%s ", mod->path);
+	fputs(bar[*i], stdout);
+	if (++*i == 3) *i = 0;
+	printf(" %s", exe_path);
+	fflush(stdout);
+}
+
 void to_exe(module_t* mod)
 {
 	char* exe_path = strdup(mod->path);
@@ -839,35 +879,44 @@ void to_exe(module_t* mod)
 
 	char* debug_args[] = {
 		STR(CC), c_source_path, "-o", exe_path,
-		"-O0", "-ggdb3", "-g", "-rdynamic", "-DDEBUG",
-		"-lm", "-Wall", "-Wno-unused", "-Wno-unused-result", "-Wno-infinite-recursion",
+		"-O0", "-ggdb3", "-g",
+#ifndef _WIN32
+		"-rdynamic",
+#endif
+		"-DDEBUG",
+		LINK_ARGS "-lm", "-Wall", "-Wno-unused", "-Wno-unused-result", "-Wno-infinite-recursion",
 		gc_test ? "-DGCTEST" : NULL, NULL
 	} ;
 
 	char* normal_args[] = {
 		STR(CC), c_source_path, "-o", exe_path,
 		"-O3", "-s", "-w",
-		"-lm", "-Wall", "-Wno-unused", "-Wno-unused-result",
+		LINK_ARGS "-lm", "-Wall", "-Wno-unused", "-Wno-unused-result",
 		gc_test ? "-DGCTEST" : NULL, NULL
 	};
 
 	char** args = debug ? debug_args : normal_args;
 
-	pid_t p = fork();
-	if (!p) execvp(args[0], args);
 	int status;
 	int i = 0;
+#ifdef _WIN32
+	void* process = win_spawn(args);
+	if (!process)
+	{
+		fprintf(stderr, "Can't run C compiler '%s'\n", args[0]);
+		exit(EXIT_FAILURE);
+	}
+	while (!win_poll(process, &status))
+		print_progress(mod, exe_path, &i);
+#else
+	pid_t p = fork();
+	if (!p) execvp(args[0], args);
 	while (!waitpid(p, &status, WNOHANG))
 	{
 		usleep(50000);
-		fputc('\r', stdout);
-		printf("%s ", mod->path);
-		char* bar[3] = { "> >> >> >> >> >> >> >> >> >> ", ">> >> >> >> >> >> >> >> >> >>", " >> >> >> >> >> >> >> >> >> >" };
-		fputs(bar[i], stdout);
-		if (++i == 3) i = 0;
-		printf(" %s", exe_path);
-		fflush(stdout);
+		print_progress(mod, exe_path, &i);
 	}
+#endif
 	fputc('\n', stdout);
 	remove(runtime_filename);
 	if (status != EXIT_SUCCESS) exit(status);
@@ -898,7 +947,11 @@ void c_emit_funcall(func_t* fn, FILE* c_source, reg_dequeue_t* registers)
 
 void to_c(module_t* mod)
 {
+#ifdef _WIN32
+	win_temp_path(runtime_filename);
+#else
 	mkstemps(runtime_filename, 2);
+#endif
 	FILE* runtime_file = fopen(runtime_filename, "w");
 	fprintf(runtime_file, "%.*s", src_runtime_h_len, (char*)src_runtime_h);
 	fclose(runtime_file);
@@ -3387,8 +3440,12 @@ int main(int argc, char** argv)
 		return EXIT_FAILURE;
 	}
 	print_banner();
+#ifdef _WIN32
+	heap = heap_committed = win_reserve_heap();
+#else
 	long system_memory = sysconf(_SC_PHYS_PAGES) * 4096;
 	heap = mmap(0, system_memory, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE, -1, 0);
+#endif
 	load_preludes();
 	module_t* m = create_module(filename);
 	void(*stages[])(module_t*)
@@ -3524,7 +3581,13 @@ word_list_t* builtins(void)
 void load_preludes(void)
 {
 	prelude2.path = NULL;
+#ifdef _WIN32
+	char temp_path[WIN_PATH_MAX];
+	win_temp_path(temp_path);
+	prelude2.file = fopen(temp_path, "w+bTD");
+#else
 	prelude2.file = tmpfile();
+#endif
 	prelude2.uses = NULL;
 	prelude2.tree = NULL;
 	prelude2.funcs = NULL;
