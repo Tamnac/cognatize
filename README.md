@@ -47,7 +47,7 @@ CognaC is the original Cognate compiler, it compiles Cognate programs into effic
 - Approaches the speed of C for some small programs
 
 ### Building Cognate
-Currently, Cognate will run on Linux and MacOS systems. If you use Windows, then you can install Cognate on the Windows Subsystem for Linux. To build Cognate, you will need `make`, `flex`, `bison`, and a C compiler (currently supported are GCC, Clang, and TCC). After installing these, simply run:
+Cognate runs on Linux, MacOS and Windows (see below for Windows). To build Cognate, you will need `make`, `flex`, `bison`, and a C compiler (currently supported are GCC, Clang, and TCC). After installing these, simply run:
 ```
 make
 ```
@@ -68,5 +68,12 @@ If the tests all pass (they should!), you can then try running some of the inclu
 cognac examples/fizzbuzz.cog
 ./examples/fizzbuzz
 ```
+
+#### Windows
+On Windows, Cognate builds natively with MinGW-w64 GCC (for example from Scoop or MSYS2) and a `make` that provides `rm`, `grep` and `xxd` (such as the one in Git for Windows). `flex` and `bison` are available as `win_flex` and `win_bison` from [winflexbison](https://github.com/lexxmark/winflexbison). Make sure `gcc` is on your `PATH`, then run:
+```
+make FLEX=win_flex BISON=win_bison
+```
+The Windows runtime uses its own POSIX-style regular expression engine, so no extra libraries are needed. Alternatively, you can still use the Windows Subsystem for Linux.
 
 [Here](https://cognate-lang.github.io/learn.html) is an work-in-progress introduction to the language.

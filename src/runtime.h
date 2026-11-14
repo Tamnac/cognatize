@@ -29,6 +29,8 @@
 #define BOOLEAN WINDOWS_BOOLEAN
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <io.h>
+#include <fcntl.h>
 #undef BOOLEAN
 #else
 #include <sys/resource.h>
@@ -894,6 +896,9 @@ int main(int argc, char** argv)
 #ifdef _WIN32
 	SetConsoleCP(CP_UTF8);
 	SetConsoleOutputCP(CP_UTF8);
+	// Keep output byte-identical to other platforms (no \n to \r\n translation).
+	_setmode(_fileno(stdout), _O_BINARY);
+	_setmode(_fileno(stderr), _O_BINARY);
 	if unlikely(setlocale(LC_ALL, ".UTF-8") == NULL)
 #else
 	if unlikely(setlocale(LC_ALL, "") == NULL)
