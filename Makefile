@@ -8,6 +8,7 @@ TESTS=$(basename $(wildcard tests/*.cog))
 
 ifeq ($(OS),Windows_NT)
 EXE=.exe
+CFLAGS+=-D__USE_MINGW_ANSI_STDIO=1
 PLATFORM_SRC=src/winport.c
 else
 EXE=

@@ -1,6 +1,13 @@
 // ---------- RUNTIME HEADER ----------
 #define _GNU_SOURCE
 
+#ifdef _WIN32
+#define __USE_MINGW_ANSI_STDIO 1 // C99 printf, including %zu
+#define PRINTF_ARCHETYPE __MINGW_PRINTF_FORMAT
+#else
+#define PRINTF_ARCHETYPE printf
+#endif
+
 #ifndef __TINYC__
 #define _FORTIFY_SOURCE 2
 #endif
@@ -34,6 +41,19 @@
 #include <stdint.h>
 #include <sys/stat.h>
 #include <setjmp.h>
+
+// Jump buffers for Begin live in garbage collected memory, which is only
+// 8-byte aligned. The jmp_buf of mingw-w64 needs 16-byte alignment, so use the
+// compiler builtins there.
+#ifdef _WIN32
+typedef void* cog_jmp_buf[5];
+#define cog_setjmp(buf) __builtin_setjmp(buf)
+#define cog_longjmp(buf) __builtin_longjmp(buf, 1)
+#else
+typedef jmp_buf cog_jmp_buf;
+#define cog_setjmp(buf) setjmp(buf)
+#define cog_longjmp(buf) longjmp(buf, 1)
+#endif
 #include <stdbool.h>
 
 #ifdef __TINYC__
@@ -669,7 +689,7 @@ const SYMBOL SYMreadHwriteHexisting = "read-write-existing";
 static void init_stack(void);
 static void init_general_purpose_buffer(void);
 static STRING show_object(const ANY object, char*, LIST);
-static void _Noreturn __attribute__((format(printf, 1, 2))) throw_error_fmt(const char* const, ...);
+static void _Noreturn __attribute__((format(PRINTF_ARCHETYPE, 1, 2))) throw_error_fmt(const char* const, ...);
 static void _Noreturn throw_error(const char* const);
 static ptrdiff_t compare_objects(ANY, ANY);
 //static _Bool match_objects(ANY, ANY);
@@ -1122,7 +1142,7 @@ static void print_backtrace(int n, const backtrace* b, int last_spaces)
 }
 #endif
 
-static _Noreturn __attribute__((format(printf, 1, 2))) void throw_error_fmt(const char* const fmt, ...)
+static _Noreturn __attribute__((format(PRINTF_ARCHETYPE, 1, 2))) void throw_error_fmt(const char* const fmt, ...)
 {
 	char buf[1024];
 	fputs("\n\n\033[31;1m    ", stderr);
@@ -2227,13 +2247,13 @@ static NUMBER ___random(NUMBER low, NUMBER high)
 	else if (high - low < 1) return low;
 	// This is not cryptographically secure btw.
 	// Since RAND_MAX may only be 2^15, we need to do this:
-	const long num
-		= ((long)(short)rand())
-		| ((long)(short)rand() << 15)
-		| ((long)(short)rand() << 30)
-		| ((long)(short)rand() << 45)
-		| ((long)				rand() << 60);
-	const double r = low + (NUMBER)(num % (unsigned long)(high - low));
+	const long long num
+		= ((long long)(short)rand())
+		| ((long long)(short)rand() << 15)
+		| ((long long)(short)rand() << 30)
+		| ((long long)(short)rand() << 45)
+		| ((long long)				rand() << 60);
+	const double r = low + (NUMBER)(num % (unsigned long long)(high - low));
 	return r;
 invalid_range:
 	throw_error_fmt("Invalid range %.14g..%.14g", low, high);
@@ -2919,25 +2939,25 @@ static void oh_no(ANY* env)
 {
 #ifdef DEBUG
 	// Remove all the now-invalid backtraces.
-	while ((char*)trace < *(char**)(1 + (jmp_buf*)env)) trace = trace->next;
+	while ((char*)trace < *(char**)(1 + (cog_jmp_buf*)env)) trace = trace->next;
 #endif
-	longjmp(*(jmp_buf*)env, 1);
+	cog_longjmp(*(cog_jmp_buf*)env);
 }
 
 __attribute__((returns_twice))
 static void ___begin(BLOCK f)
 {
 #ifdef DEBUG
-	BLOCK a = gc_malloc(sizeof *a + sizeof(jmp_buf) + sizeof(char*));
+	BLOCK a = gc_malloc(sizeof *a + sizeof(cog_jmp_buf) + sizeof(char*));
 	// Add the address of the stack pointer so we know which backtraces to pop.
 	char c;
-	*(char**)(1 + (jmp_buf*)&a->env) = &c;
+	*(char**)(1 + (cog_jmp_buf*)&a->env) = &c;
 #else
-	BLOCK a = gc_malloc(sizeof *a + sizeof(jmp_buf));
+	BLOCK a = gc_malloc(sizeof *a + sizeof(cog_jmp_buf));
 #endif
-	for (uintptr_t* p = (uintptr_t*)&a->env ; (char*)p < (char*)&a->env + sizeof(jmp_buf) ; ++p)
+	for (uintptr_t* p = (uintptr_t*)&a->env ; (char*)p < (char*)&a->env + sizeof(cog_jmp_buf) ; ++p)
 		gc_mark_ptr(p);
-	if (!setjmp(*(jmp_buf*)&a->env))
+	if (!cog_setjmp(*(cog_jmp_buf*)&a->env))
 	{
 		a->fn = oh_no;
 		push(box_BLOCK(a));

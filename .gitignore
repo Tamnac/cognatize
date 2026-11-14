@@ -3,6 +3,8 @@ src/parser.c
 src/parser.h
 src/runtime_bytes.h
 src/prelude.h
-cognac.exe
 cognac
 *.exe
+tests/*.c
+tests/*.log
+examples/*.c
