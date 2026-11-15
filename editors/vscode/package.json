@@ -1,0 +1,61 @@
+{
+  "name": "cognate",
+  "displayName": "Cognate",
+  "description": "Syntax highlighting and language server for the Cognate programming language",
+  "version": "0.1.0",
+  "publisher": "cognate-lang",
+  "license": "BSD-2-Clause",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cognate-lang/cognate"
+  },
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=22.18"
+  },
+  "categories": ["Programming Languages"],
+  "main": "./dist/extension.cjs",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "cognate",
+        "aliases": ["Cognate"],
+        "extensions": [".cog"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "cognate",
+        "scopeName": "source.cognate",
+        "path": "./syntaxes/cognate.tmLanguage.json"
+      }
+    ],
+    "configurationDefaults": {
+      "[cognate]": {
+        "editor.semanticHighlighting.enabled": true
+      }
+    }
+  },
+  "scripts": {
+    "generate": "node scripts/generate-library.ts",
+    "build": "npm run generate && esbuild src/extension.ts src/server.ts --bundle --platform=node --format=cjs --external:vscode --outdir=dist --out-extension:.js=.cjs --sourcemap",
+    "typecheck": "npm run generate && tsc --noEmit",
+    "test": "node --test \"test/*.test.ts\"",
+    "package": "npm run build && vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  }
+}

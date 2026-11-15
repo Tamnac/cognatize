@@ -1,0 +1,88 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Cognate",
+  "scopeName": "source.cognate",
+  "patterns": [
+    { "include": "#line-comment" },
+    { "include": "#block-comment" },
+    { "include": "#string" },
+    { "include": "#def" },
+    { "include": "#let" },
+    { "include": "#number" },
+    { "include": "#module-identifier" },
+    { "include": "#identifier" },
+    { "include": "#symbol" },
+    { "include": "#informal" },
+    { "include": "#punctuation" },
+    { "include": "#invalid" }
+  ],
+  "repository": {
+    "line-comment": {
+      "name": "comment.line.cognate",
+      "match": "~~.*$"
+    },
+    "block-comment": {
+      "name": "comment.block.cognate",
+      "begin": "~",
+      "end": "~"
+    },
+    "string": {
+      "name": "string.quoted.double.cognate",
+      "begin": "\"",
+      "end": "\"|$",
+      "patterns": [
+        { "name": "constant.character.escape.cognate", "match": "\\\\[abfnrtv\\\\\"]" },
+        { "name": "invalid.illegal.escape.cognate", "match": "\\\\." }
+      ]
+    },
+    "def": {
+      "match": "(D[eE][fF])(?=[;()$^~\\s]|$)(?:\\s+([A-Z\\-?!+/*><=^.][A-Za-z0-9\\-?!'+/*>=<^.]*)(?=[;()$^~\\s]|$))?",
+      "captures": {
+        "1": { "name": "keyword.declaration.def.cognate" },
+        "2": { "name": "entity.name.function.cognate" }
+      }
+    },
+    "let": {
+      "match": "(L[eE][tT])(?=[;()$^~\\s]|$)(?:\\s+([A-Z\\-?!+/*><=^.][A-Za-z0-9\\-?!'+/*>=<^.]*)(?=[;()$^~\\s]|$))?",
+      "captures": {
+        "1": { "name": "keyword.declaration.let.cognate" },
+        "2": { "name": "variable.other.definition.cognate" }
+      }
+    },
+    "number": {
+      "name": "constant.numeric.cognate",
+      "match": "-?(?:[1-9][0-9]*|[0-9])(?:\\.[0-9]+)?(?:e-?[0-9]+)?(?=[;()$^~\\s]|$)"
+    },
+    "module-identifier": {
+      "match": "([A-Za-z0-9\\-?!'+/*>=<^.]+)(:)([A-Z\\-?!+/*><=^.][A-Za-z0-9\\-?!'+/*>=<^.]*)(?=[;()$^~\\s]|$)",
+      "captures": {
+        "1": { "name": "entity.name.namespace.cognate" },
+        "2": { "name": "punctuation.separator.namespace.cognate" },
+        "3": { "name": "support.function.cognate" }
+      }
+    },
+    "identifier": {
+      "name": "support.function.cognate",
+      "match": "[A-Z\\-?!+/*><=^.][A-Za-z0-9\\-?!'+/*>=<^.]*(?=[;()$^~\\s]|$)"
+    },
+    "symbol": {
+      "name": "constant.other.symbol.cognate",
+      "match": "\\\\[A-Za-z0-9\\-?!'+/*>=<^.]+(?=[;()$^~\\s]|$)"
+    },
+    "informal": {
+      "name": "comment.line.informal.cognate",
+      "match": "[a-z][a-z0-9'\\-?!.]*"
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.section.block.begin.cognate", "match": "\\(" },
+        { "name": "punctuation.section.block.end.cognate", "match": "\\)" },
+        { "name": "punctuation.terminator.statement.cognate", "match": ";" }
+      ]
+    },
+    "invalid": {
+      "name": "invalid.illegal.cognate",
+      "match": "[^\\s]"
+    }
+  }
+}
