@@ -1,4 +1,4 @@
-<h1 align="center"> Cognate </h1>
+<h1 align="center"> Cognatize </h1>
 <h2 align="center"> Readable and concise concatenative programming </h2>
 <p align="center">
 <img src="https://github.com/cognate-lang/cognate/actions/workflows/test-debian-gcc.yml/badge.svg">
@@ -9,6 +9,8 @@
 </p>
 
 <img src="screenshots/fizzbuzz.png" width="100%" title="Fizzbuzz in Cognate (font is Hermit)">
+
+Cognatize is a fork of [Cognate](https://github.com/cognate-lang/cognate) with Windows support, a few compiler conveniences and a VS Code extension. See [What Cognatize adds](#what-cognatize-adds).
 
 Cognate is a project aiming to create a human readable programming language with as little syntax as possible. Where natural language programming usually uses many complex syntax rules, instead Cognate takes them away. What it adds is simple, a way to embed comments into statements.
 
@@ -36,6 +38,17 @@ Interested? Read the [tutorial](https://cognate-lang.github.io/learn/), and chec
 - CognaC (this repository) is the original compiler -- it performs type inference and produces efficient binaries.
 - [Cognate Playground](https://cognate-playground.hedy.dev/) (developed by [hedyhli](https://github.com/hedyhli)) runs Cognate programs in a web browser.
 - [Cogni](https://github.com/dragoncoder047/cogni) (developed by [dragoncoder047](https://github.com/dragoncoder047)) interprets Cognate programs and is optimised to run on microcontrollers.
+
+## What Cognatize adds
+
+The language itself is unchanged. The additions are in the compiler, the runtime and the tooling.
+
+- **Native Windows support.** The compiler and runtime build with MinGW-w64 GCC, with no `windows.h` include (the used Win32 functions are declared directly, which roughly halves C compile time). The runtime commits memory lazily, handles exceptions, provides its own POSIX-style regex engine with leftmost-longest matching and UTF-8 bracket expressions, uses binary stdout/stderr and a 64-bit random generator, and bounds the length of spawned command lines.
+- **`cognac run file.cog`.** Compiles the program and then runs it, returning its exit status.
+- **`-quiet` flag.** Hides the banner and progress output.
+- **`Clock` builtin.** Returns monotonic time in seconds.
+- **Parser fixes.** The whole source is read into a buffer, so files without a trailing newline parse and report errors correctly. Errors in the prelude show the offending source line from any directory.
+- **VS Code extension** in [editors/vscode](editors/vscode): syntax and semantic highlighting, diagnostics for lexical and bracket errors, outline, folding, and hover and completion for builtins, prelude functions and user definitions.
 
 ## Cognac
 
