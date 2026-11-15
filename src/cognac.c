@@ -175,26 +175,12 @@ _Noreturn void throw_error(char* message, where_t* where)
 	// Calculate width of the "[LINE_NUMBER]" bit
 	message = strdup(message);
 	char number_box[64];
-	sprintf(number_box, "[%s %zu:%zu] ", where->mod->path, where->line, where->col);
+	sprintf(number_box, "[%s %zu:%zu] ", where->mod->path ? where->mod->path : "prelude", where->line, where->col);
 	size_t offset = strlen(number_box) - 1 + where->col;
-
-	// Ok now we need to actually get the line
-	fclose(where->mod->file);
-	if (!where->mod->path) // probably preludes
-		where->mod->path = "src/prelude.cog";
-	where->mod->file = fopen(where->mod->path, "r");
-	while (--where->line)
-	{
-		char c;
-		do { c = fgetc(where->mod->file); } while (c && c != EOF && c != '\n'); // read one line. TODO this is bad
-	}
 
 	char line_start[MAX_ERROR_LINE_LENGTH];
 	char* line = line_start;
-	*line = '\0';
-	fgets(line, MAX_ERROR_LINE_LENGTH, where->mod->file);
-
-	for (char* p = line ; p ; p++) if (*p == '\n') { *p = '\0'; break; }
+	snprintf(line, MAX_ERROR_LINE_LENGTH, "%s", where->line_str);
 
 	// Now we strip leading whitespace
 	while (*line && *line != '\n' && isspace(*line)) line++, offset--;
