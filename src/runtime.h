@@ -911,6 +911,7 @@ static NUMBER ___abs(NUMBER);
 static void ___error(STRING);
 //static BLOCK ___precompute(BLOCK);
 static void ___wait(NUMBER);
+static NUMBER ___clock(void);
 static LIST ___split(STRING, STRING);
 //static BLOCK ___remember(BLOCK);
 
@@ -2637,6 +2638,14 @@ static void ___wait(NUMBER seconds)
 #else
 	sleep(seconds);
 #endif
+}
+
+static NUMBER ___clock(void)
+{
+	assert_impure();
+	struct timespec ts;
+	if unlikely(clock_gettime(CLOCK_MONOTONIC, &ts) == -1) throw_error("Cannot get system time");
+	return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
 /*

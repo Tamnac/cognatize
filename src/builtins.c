@@ -67,6 +67,7 @@
 {.name="number",              .calltype=call, .argc=1, .args={string},      .returns=true, .rettype=number},
 //{.name="precompute",          .calltype=call, .argc=1, .args={block},   .returns=true, .rettype=block},
 {.name="wait",                .calltype=call, .argc=1, .args={number},  .returns=false},
+{.name="clock",               .calltype=call, .argc=0, .returns=true, .rettype=number},
 {.name="stop",                .calltype=call, .argc=0, .returns=false},
 {.name="show",                .calltype=call, .argc=1, .args={any},     .returns=true, .rettype=string, .overload=true, .overloads={number, symbol, table, string, boolean, block, list, box, io, NIL} },
 {.name="stack",               .calltype=call, .returns=true, .rettype=list, .stack=true},
