@@ -59,6 +59,7 @@ bool debug = false;
 bool gc_test = false;
 bool noinline = false;
 bool run = false;
+bool quiet = false;
 
 char* sanitize(char*);
 
@@ -847,6 +848,7 @@ const char* c_word_name(word_t* word)
 
 static void print_progress(module_t* mod, const char* exe_path, int* i)
 {
+	if (quiet) return;
 	char* bar[3] = { "> >> >> >> >> >> >> >> >> >> ", ">> >> >> >> >> >> >> >> >> >>", " >> >> >> >> >> >> >> >> >> >" };
 	fputc('\r', stdout);
 	printf("%s ", mod->path);
@@ -933,7 +935,7 @@ void to_exe(module_t* mod)
 		print_progress(mod, exe_path, &i);
 	}
 #endif
-	fputc('\n', stdout);
+	if (!quiet) fputc('\n', stdout);
 	remove(runtime_filename);
 	if (status != EXIT_SUCCESS) exit(status);
 	if (run) run_exe(exe_path);
@@ -3443,6 +3445,7 @@ int main(int argc, char** argv)
 	for (int i = 1 ; i < argc ; ++i)
 	{
 		if (!strcmp(argv[i], "run")) run = true;
+		else if (!strcmp(argv[i], "-quiet")) quiet = true;
 		else if (!strcmp(argv[i], "-debug")) debug = true;
 		else if (!strcmp(argv[i], "-GCTEST")) gc_test = true;
 		else if (!strcmp(argv[i], "-NOINLINE")) noinline = true;
@@ -3454,10 +3457,10 @@ int main(int argc, char** argv)
 	}
 	if (!filename)
 	{
-		fprintf(stderr, "USAGE: cognac [run] filename.cog\n");
+		fprintf(stderr, "USAGE: cognac [run] [-quiet] filename.cog\n");
 		return EXIT_FAILURE;
 	}
-	print_banner();
+	if (!quiet) print_banner();
 #ifdef _WIN32
 	heap = heap_committed = win_reserve_heap();
 #else
