@@ -8,9 +8,9 @@
 <img src="https://img.shields.io/github/license/cognate-lang/cognate.svg">
 </p>
 
-<img src="screenshots/fizzbuzz.png" width="100%" title="Fizzbuzz in Cognate (font is Hermit)">
-
 Cognatize is a fork of [Cognate](https://github.com/cognate-lang/cognate) with Windows support, a few compiler conveniences and a VS Code extension. See [What Cognatize adds](#what-cognatize-adds).
+
+<img src="screenshots/fizzbuzz.png" width="100%" title="Fizzbuzz in Cognate (font is Hermit)">
 
 Cognate is a project aiming to create a human readable programming language with as little syntax as possible. Where natural language programming usually uses many complex syntax rules, instead Cognate takes them away. What it adds is simple, a way to embed comments into statements.
 

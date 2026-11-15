@@ -277,7 +277,7 @@ _Noreturn void throw_error(char*, where_t*);
 void load_preludes(void);
 
 typedef struct yy_buffer_state* YY_BUFFER_STATE;
-YY_BUFFER_STATE yy_scan_bytes(const char*, int);
+YY_BUFFER_STATE scan_source(const char*, size_t);
 void yy_delete_buffer(YY_BUFFER_STATE);
 extern ast_list_t* full_ast;
 extern where_t* parse_pos(char*);

@@ -65,3 +65,8 @@ L[eE][tT]/{END} return LET;
 
 . yyerror("invalid token");
 %%
+
+YY_BUFFER_STATE scan_source(const char* src, size_t len)
+{
+	return yy_scan_bytes(src, len);
+}

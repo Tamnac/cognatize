@@ -500,7 +500,7 @@ void module_parse(module_t* mod)
 	}
 
 	pmod = mod;
-	YY_BUFFER_STATE buffer = yy_scan_bytes(src, len); // imagine having a reentrant parser.
+	YY_BUFFER_STATE buffer = scan_source(src, len); // imagine having a reentrant parser.
 	free(src);
 	yylloc.first_line = 1;
 	yylloc.first_column = 1;
