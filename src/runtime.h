@@ -24,14 +24,38 @@
 #include <locale.h>
 #include <signal.h>
 #include <time.h>
+#include <stdint.h>
 #ifdef _WIN32
-// windows.h defines its own BOOLEAN, which the runtime redefines below.
-#define BOOLEAN WINDOWS_BOOLEAN
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 #include <io.h>
 #include <fcntl.h>
-#undef BOOLEAN
+
+// <windows.h> takes about half of the C compile time of a program, and clashes
+// with the runtime's BOOLEAN, so declare the few Win32 functions used instead.
+#define WINAPI __stdcall
+#define CP_UTF8 65001
+#define MEM_COMMIT 0x1000
+#define MEM_RESERVE 0x2000
+#define PAGE_READWRITE 0x04
+#define EXCEPTION_ACCESS_VIOLATION 0xC0000005L
+#define EXCEPTION_STACK_OVERFLOW 0xC00000FDL
+#define EXCEPTION_CONTINUE_SEARCH 0
+#define EXCEPTION_CONTINUE_EXECUTION (-1)
+typedef long LONG;
+typedef struct
+{
+	unsigned long ExceptionCode;
+	unsigned long ExceptionFlags;
+	void* ExceptionRecord;
+	void* ExceptionAddress;
+	unsigned long NumberParameters;
+	uintptr_t ExceptionInformation[15];
+} EXCEPTION_RECORD;
+typedef struct { EXCEPTION_RECORD* ExceptionRecord; void* ContextRecord; } EXCEPTION_POINTERS;
+void* WINAPI VirtualAlloc(void*, size_t, unsigned long, unsigned long);
+void* WINAPI AddVectoredExceptionHandler(unsigned long, LONG (WINAPI*)(EXCEPTION_POINTERS*));
+int WINAPI SetConsoleCP(unsigned int);
+int WINAPI SetConsoleOutputCP(unsigned int);
+void WINAPI Sleep(unsigned long);
 #else
 #include <sys/resource.h>
 #include <sys/mman.h>
