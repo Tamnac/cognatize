@@ -276,7 +276,9 @@ const char* print_val_type(val_type_t);
 _Noreturn void throw_error(char*, where_t*);
 void load_preludes(void);
 
-extern FILE* yyin;
+typedef struct yy_buffer_state* YY_BUFFER_STATE;
+YY_BUFFER_STATE yy_scan_bytes(const char*, int);
+void yy_delete_buffer(YY_BUFFER_STATE);
 extern ast_list_t* full_ast;
 extern where_t* parse_pos(char*);
 int yylex(void);

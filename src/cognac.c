@@ -475,36 +475,37 @@ void module_parse(module_t* mod)
 {
 	fseek(mod->file, 0, SEEK_SET);
 
-	mod->num_lines = 0;
-	while(!feof(mod->file)) if(fgetc(mod->file) == '\n') mod->num_lines++; // count lines.
+	size_t len = 0, cap = 4096;
+	char* src = malloc(cap);
+	for (size_t n ; (n = fread(src + len, 1, cap - len - 1, mod->file)) > 0 ; )
+	{
+		len += n;
+		if (len + 1 >= cap) src = realloc(src, cap *= 2);
+	}
+	if (len == 0 || src[len-1] != '\n') src[len++] = '\n'; // the lexer needs a character after the final token.
+
+	mod->num_lines = 1; // the line after the final newline, where errors at EOF are reported.
+	for (size_t i = 0 ; i < len ; ++i) if (src[i] == '\n') mod->num_lines++;
 
 	mod->lines = alloc(sizeof(char*) * mod->num_lines);
-
-	fseek(mod->file, 0, SEEK_SET);
-
-	for (int i = 0 ; i < mod->num_lines ; ++i) // populate lines[]
+	char* start = src;
+	for (size_t i = 0 ; i < mod->num_lines ; ++i)
 	{
-		mod->lines[i] = (char*)alloc(1024);
-
-		for (int ii = 0 ; ii < 1023 ; ++ii)
-		{
-			char c = fgetc(mod->file);
-			if (c == '\n')
-			{
-				mod->lines[i][ii] = '\0';
-				break;
-			}
-			else mod->lines[i][ii] = c;
-		}
-		mod->lines[i][1023] = '\0';
+		char* end = start;
+		while (end < src + len && *end != '\n') ++end;
+		mod->lines[i] = alloc(end - start + 1);
+		memcpy(mod->lines[i], start, end - start);
+		mod->lines[i][end - start] = '\0';
+		start = end + 1;
 	}
 
-	fseek(mod->file, 0, SEEK_SET);
 	pmod = mod;
-	yyin = mod->file; // imagine having a reentrant parser.
+	YY_BUFFER_STATE buffer = yy_scan_bytes(src, len); // imagine having a reentrant parser.
+	free(src);
 	yylloc.first_line = 1;
 	yylloc.first_column = 1;
 	yyparse();
+	yy_delete_buffer(buffer);
 	mod->tree = full_ast;
 }
 
