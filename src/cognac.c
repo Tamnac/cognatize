@@ -58,6 +58,7 @@ char* strdup (const char*);
 bool debug = false;
 bool gc_test = false;
 bool noinline = false;
+bool run = false;
 
 char* sanitize(char*);
 
@@ -869,6 +870,35 @@ static void print_progress(module_t* mod, const char* exe_path, int* i)
 	fflush(stdout);
 }
 
+static void run_exe(const char* exe_path)
+{
+	char* path = malloc(strlen(exe_path) + 3);
+	sprintf(path, "%s%s", strpbrk(exe_path, "/\\") ? "" : "./", exe_path);
+	char* args[] = { path, NULL };
+	int status;
+	fflush(stdout);
+#ifdef _WIN32
+	void* process = win_spawn(args);
+	if (!process)
+	{
+		fprintf(stderr, "Can't run '%s'\n", path);
+		exit(EXIT_FAILURE);
+	}
+	while (!win_poll(process, &status));
+#else
+	pid_t p = fork();
+	if (!p)
+	{
+		execv(path, args);
+		fprintf(stderr, "Can't run '%s'\n", path);
+		_exit(EXIT_FAILURE);
+	}
+	waitpid(p, &status, 0);
+	status = WIFEXITED(status) ? WEXITSTATUS(status) : EXIT_FAILURE;
+#endif
+	exit(status);
+}
+
 void to_exe(module_t* mod)
 {
 	char* exe_path = strdup(mod->path);
@@ -920,6 +950,7 @@ void to_exe(module_t* mod)
 	fputc('\n', stdout);
 	remove(runtime_filename);
 	if (status != EXIT_SUCCESS) exit(status);
+	if (run) run_exe(exe_path);
 }
 
 void c_emit_funcall(func_t* fn, FILE* c_source, reg_dequeue_t* registers)
@@ -3425,7 +3456,8 @@ int main(int argc, char** argv)
 
 	for (int i = 1 ; i < argc ; ++i)
 	{
-		if (!strcmp(argv[i], "-debug")) debug = true;
+		if (!strcmp(argv[i], "run")) run = true;
+		else if (!strcmp(argv[i], "-debug")) debug = true;
 		else if (!strcmp(argv[i], "-GCTEST")) gc_test = true;
 		else if (!strcmp(argv[i], "-NOINLINE")) noinline = true;
 		else
@@ -3436,7 +3468,7 @@ int main(int argc, char** argv)
 	}
 	if (!filename)
 	{
-		fprintf(stderr, "USAGE: cognac filename.cog\n");
+		fprintf(stderr, "USAGE: cognac [run] filename.cog\n");
 		return EXIT_FAILURE;
 	}
 	print_banner();
